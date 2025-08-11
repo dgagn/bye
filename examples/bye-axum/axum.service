@@ -1,0 +1,16 @@
+[Unit]
+Description=Axum
+After=network.target
+Requires=axum.socket
+
+[Service]
+Type=simple
+RuntimeDirectory=axum
+ExecStart=/usr/bin/axum
+ExecReload=/bin/kill -USR1 $MAINPID
+Environment=RUST_LOG=bye=debug,info
+PIDFile=/run/axum/axum.pid
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

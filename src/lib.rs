@@ -16,8 +16,8 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
-    path::PathBuf,
-    sync::{LazyLock, atomic::AtomicU32},
+    path::{Path, PathBuf},
+    sync::{atomic::AtomicU32, LazyLock},
     time::Duration,
 };
 
@@ -48,7 +48,7 @@ struct UpgradeUsr1 {
 }
 
 impl UpgradeUsr1 {
-    pub fn new(exe_path: &PathBuf) -> bye::Result<Self> {
+    pub fn new(exe_path: &Path) -> bye::Result<Self> {
         let exe_path = CString::new(exe_path.as_os_str().as_bytes())?;
         let args = std::env::args_os()
             .map(|arg| CString::new(arg.as_bytes()))
@@ -136,7 +136,7 @@ async fn fork_and_exec(
     ))?);
 
     // cstr for execve with old argv
-    let argv_ref: Vec<&_> = args.iter().map(|s| s.as_c_str()).collect();
+    let argv_ref: Vec<&_> = args.iter().map(std::ffi::CString::as_c_str).collect();
 
     match unsafe { fork().map_err(Error::Fork)? } {
         ForkResult::Parent { child } => {
@@ -200,6 +200,7 @@ async fn fork_and_exec(
                     replace_or_push_env(&mut env_with_fd, "LISTEN_PID", child_pid).ok();
 
                     for i in 0..nfds {
+                        #[allow(clippy::cast_possible_wrap)]
                         let fd = (3 + i) as i32;
                         let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
                         if let Err(e) = clear_cloexec(&borrowed) {
@@ -211,7 +212,7 @@ async fn fork_and_exec(
                 }
             }
 
-            let envp: Vec<&_> = env_with_fd.iter().map(|s| s.as_c_str()).collect();
+            let envp: Vec<&_> = env_with_fd.iter().map(std::ffi::CString::as_c_str).collect();
 
             execve(path, &argv_ref, &envp).map_err(Error::Execve)?;
             std::process::exit(127);
@@ -234,6 +235,11 @@ fn parse_fd_from_env(v: &OsStr) -> bye::Result<i32> {
     Ok(fd)
 }
 
+/// Tries to get the PID file path from the `PIDFILE` environment variable.
+/// # Errors
+/// - `VarError::NotPresent` if the `PIDFILE` environment variable is not set.
+/// - `VarError::NotUnicode` if the `PIDFILE` environment variable is not valid Unicode.
+/// - `VarError::Empty` if the `PIDFILE` environment variable is set but empty.
 pub fn try_pid_file() -> Result<PathBuf, VarError> {
     Ok(std::env::var("PIDFILE")?.into())
 }
@@ -246,6 +252,9 @@ static SYSTEMD_PORTS: LazyLock<Vec<u16>> = std::sync::LazyLock::new(|| {
     })
 });
 
+/// Returns the list of ports inherited from systemd socket activation.
+/// This is computed once and cached for the lifetime of the program.
+#[must_use]
 pub fn systemd_ports() -> &'static [u16] {
     &SYSTEMD_PORTS
 }
@@ -273,13 +282,14 @@ fn compute_systemd_ports() -> bye::Result<Vec<u16>> {
 
     let mut ports = Vec::with_capacity(listen_fds as usize);
     for i in 0..listen_fds {
+        #[allow(clippy::cast_possible_wrap)]
         let fd = (3 + i) as i32;
 
         let port = match getsockname::<nix::sys::socket::SockaddrStorage>(fd) {
             Ok(v) => v
                 .as_sockaddr_in()
-                .map(|sockaddr| sockaddr.port())
-                .or_else(|| v.as_sockaddr_in6().map(|sockaddr| sockaddr.port()))
+                .map(nix::sys::socket::SockaddrIn::port)
+                .or_else(|| v.as_sockaddr_in6().map(nix::sys::socket::SockaddrIn6::port))
                 .unwrap_or(0),
             Err(e) => {
                 return Err(Error::Sockname(e));
@@ -294,9 +304,15 @@ fn compute_systemd_ports() -> bye::Result<Vec<u16>> {
 }
 
 /// Creates a TCP listener that uses systemd socket activation if available.
+/// If no systemd socket is found for the given port, it falls back to binding a new socket.
+/// # Errors
+/// - If the systemd socket activation is enabled but no socket is found for the given port.
+/// - If binding a new socket fails.
 pub async fn systemd_tcp_listener(port: u16) -> bye::Result<TcpListener> {
     let systemd_ports = SYSTEMD_PORTS.iter().position(|&p| p == port);
     let listener = if let Some(systemd_port) = systemd_ports {
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_wrap)]
         let fd = (3 + systemd_port) as i32;
         #[cfg(feature = "tracing")]
         info!("using systemd socket fd: {}", fd);
@@ -314,6 +330,11 @@ pub async fn systemd_tcp_listener(port: u16) -> bye::Result<TcpListener> {
 }
 
 /// Notifies the system that the service is ready.
+/// This function should be called once the service is fully initialized and ready to accept requests.
+/// # Errors
+/// - If the `UPGRADE_FD` environment variable is set but invalid.
+/// - If writing to the `UPGRADE_FD` fails.
+/// - If writing to the PID file (if `PIDFILE` is set) fails.
 pub fn ready() -> bye::Result<()> {
     let pid = std::process::id();
     let prev = READY_LAST_PID.swap(pid, std::sync::atomic::Ordering::AcqRel);

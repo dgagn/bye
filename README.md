@@ -69,7 +69,7 @@ let handle = bye.spawn(|tok| async move {
 });
 
 // If you're not sure the app is still running, use try_spawn
-let maybe = bye.try_spawn(|tok| async move { /* … */ });
+let maybe = bye.try_spawn(|tok| async move { /* ... */ });
 ```
 
 ### Using systemd socket activation
@@ -103,44 +103,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    bye.drain().await;
+    bye.wait().await;
     Ok(())
 }
 ```
 
 ---
-
-## Concepts & API overview
-
-### `Bye`
-
-`Bye` is the facade for graceful shutdown and task orchestration.
-
-* `Bye::new()` – construct without installing signal handlers.
-* `Bye::new_with_signals()` – construct **and** spawn the async signal loop:
-  * `SIGTERM`, `SIGINT`, `SIGQUIT` → call `drain()` and exit the loop.
-  * `SIGUSR1` → attempt zero‑downtime **upgrade** (see below). If the upgrade
-  completes, the parent drains and exits; otherwise the parent keeps running.
-  * `SIGCHLD` → reap terminated children with `waitpid(WNOHANG)`.
-* `is_running()` – `true` until shutdown begins.
-* `on_shutdown()` – a `Future` that resolves when shutdown starts (soft cancel
-signal).
-* `shutdown_token()` – a clonable `CancellationToken` that is cancelled at
-shutdown.
-* `shutdown()` – idempotent: starts shutdown, cancels the broadcast token, and
-stops accepting new tasks.
-* `wait()` – future that resolves when all **previously** spawned tasks finish.
-* `drain()` – convenience: `shutdown()` then `wait()`.
-
-* Task helpers:
-
-  * `spawn(|CancellationToken| -> Future)` – track & auto‑cancel via token.
-  * `try_spawn(..) -> Option<JoinHandle<_>>` – no‑op if already shutting down.
-  * `spawn_detached(Future)` / `try_spawn_detached(Future)` – like `spawn` but
-  ignore the token.
-
-> Internally, `Bye` uses `tokio_util::task::TaskTracker` for lifecycle
-> management and a root `CancellationToken` that fans out per task.
 
 ### Upgrade (USR1) flow
 
@@ -173,19 +141,6 @@ running.
 * The signal loop is runtime‑friendly (async) and uses `tokio::signal::unix`.
 * Logging is behind the `tracing` feature. When disabled, logs are elided.
 
-### Error handling
-
-The crate defines `bye::Error`, covering:
-
-* Environment parsing (`EnvUtf8`, `EnvParse`), invalid/closed upgrade fd, and notify write errors.
-* `fork`, `execve`, `waitpid`, `pipe2`, `fcntl` failures (with the original `nix::errno::Errno`).
-* Socket discovery errors for systemd activation.
-* Generic `std::io::Error`, `std::ffi::NulError`, and `nix::Errno` conversions.
-
-Use `Result<T, bye::Error>` in your code or convert to your own error type.
-
----
-
 ## Environment variables
 
 * `UPGRADE_FD` – *internal*, set by the parent when forking; the child writes a single byte to signal readiness. You don't set this manually.
@@ -194,7 +149,7 @@ Use `Result<T, bye::Error>` in your code or convert to your own error type.
 
 ---
 
-## Safety & caveats
+## Safety and caveats
 
 * The crate uses `nix` to perform `fork`, `execve`, `fcntl`, and other low‑level operations. Unsafe code is limited and contained; functions that manipulate fds take/return `OwnedFd`/`BorrowedFd` where possible.
 * When adopting a systemd socket with `from_raw_fd`, ownership is transferred to the child process after `execve`; do not also use those fds elsewhere.

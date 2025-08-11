@@ -242,6 +242,7 @@ impl Bye {
                                 me.drain().await;
                                 return Ok(());
                             } else {
+                                #[cfg(feature = "tracing")]
                                 info!("upgrade failed, continuing without upgrade.");
                             }
                         }
@@ -251,6 +252,7 @@ impl Bye {
                                     Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => break,
                                     Ok(_) => continue,
                                     Err(e) => {
+                                        #[cfg(feature = "tracing")]
                                         error!("Error reaping child process: {}", e);
                                         break;
                                     }

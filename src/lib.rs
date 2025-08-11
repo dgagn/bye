@@ -62,7 +62,7 @@ impl UpgradeUsr1 {
         })
     }
 
-    pub async fn upgrade(&self, timeout: Option<Duration>) -> Result<bool, Error> {
+    pub async fn upgrade(&self, timeout: Option<Duration>) -> bye::Result<bool> {
         fork_and_exec(&self.exe_path, &self.args, &self.env, timeout).await
     }
 }

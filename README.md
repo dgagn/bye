@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = bye.on_shutdown() => break, // soft shutdown started
-            // … your app work here (accept connections, handle jobs, etc.)
+            // ... your app work here (accept connections, handle jobs, etc.)
         }
     }
 

@@ -119,12 +119,16 @@ async fn main() -> anyhow::Result<()> {
 * `Bye::new()` – construct without installing signal handlers.
 * `Bye::new_with_signals()` – construct **and** spawn the async signal loop:
   * `SIGTERM`, `SIGINT`, `SIGQUIT` → call `drain()` and exit the loop.
-  * `SIGUSR1` → attempt zero‑downtime **upgrade** (see below). If the upgrade completes, the parent drains and exits; otherwise the parent keeps running.
+  * `SIGUSR1` → attempt zero‑downtime **upgrade** (see below). If the upgrade
+  completes, the parent drains and exits; otherwise the parent keeps running.
   * `SIGCHLD` → reap terminated children with `waitpid(WNOHANG)`.
 * `is_running()` – `true` until shutdown begins.
-* `on_shutdown()` – a `Future` that resolves when shutdown starts (soft cancel signal).
-* `shutdown_token()` – a clonable `CancellationToken` that is cancelled at shutdown.
-* `shutdown()` – idempotent: starts shutdown, cancels the broadcast token, and stops accepting new tasks.
+* `on_shutdown()` – a `Future` that resolves when shutdown starts (soft cancel
+signal).
+* `shutdown_token()` – a clonable `CancellationToken` that is cancelled at
+shutdown.
+* `shutdown()` – idempotent: starts shutdown, cancels the broadcast token, and
+stops accepting new tasks.
 * `wait()` – future that resolves when all **previously** spawned tasks finish.
 * `drain()` – convenience: `shutdown()` then `wait()`.
 
@@ -132,16 +136,22 @@ async fn main() -> anyhow::Result<()> {
 
   * `spawn(|CancellationToken| -> Future)` – track & auto‑cancel via token.
   * `try_spawn(..) -> Option<JoinHandle<_>>` – no‑op if already shutting down.
-  * `spawn_detached(Future)` / `try_spawn_detached(Future)` – like `spawn` but ignore the token.
+  * `spawn_detached(Future)` / `try_spawn_detached(Future)` – like `spawn` but
+  ignore the token.
 
-> Internally, `Bye` uses `tokio_util::task::TaskTracker` for lifecycle management and a root `CancellationToken` that fans out per task.
+> Internally, `Bye` uses `tokio_util::task::TaskTracker` for lifecycle
+> management and a root `CancellationToken` that fans out per task.
 
 ### Upgrade (USR1) flow
 
 1. Send `SIGUSR1` to the running process.
-2. Parent **forks** and `execve`s the current binary, passing an internal pipe via the `UPGRADE_FD` env var.
-3. Child performs initialization. When ready to take traffic, it calls `bye::ready()` once.
-4. Parent sees a byte written on the pipe → calls `drain()` and exits. If the child exits prematurely without signaling ready, the parent continues running.
+2. Parent **forks** and `execve`s the current binary, passing an internal pipe
+   via the `UPGRADE_FD` env var.
+3. Child performs initialization. When ready to take traffic, it calls
+   `bye::ready()` once.
+4. Parent sees a byte written on the pipe, calls `drain()` and exits. If the
+   child exits prematurely without signaling ready, the parent continues
+running.
 
 #### `bye::ready()`
 
@@ -153,12 +163,10 @@ async fn main() -> anyhow::Result<()> {
 ### systemd socket activation
 
 * `systemd_tcp_listener(port: u16) -> TcpListener` will:
-
-  * If `LISTEN_FDS>0` and `LISTEN_PID` equals the current PID, scan fds 3.. for a socket bound to `port` and adopt it.
+  * If `LISTEN_FDS` contains a socket for this process, adopt it (the first one if multiple).
   * Otherwise, bind to `0.0.0.0:port`.
-* `systemd_ports() -> &'static [u16]` returns all discovered ports from `LISTEN_FDS` for this process (computed once).
 
-> Safety: when the parent forks & execs, the code clears `FD_CLOEXEC` on inherited listen fds so the child can adopt them; later, `from_raw_fd` is used to take ownership in the child process and convert to non‑blocking.
+* `systemd_ports() -> &'static [u16]` returns all discovered ports from `LISTEN_FDS` for this process (computed once).
 
 ### Signals & logging
 
@@ -175,53 +183,6 @@ The crate defines `bye::Error`, covering:
 * Generic `std::io::Error`, `std::ffi::NulError`, and `nix::Errno` conversions.
 
 Use `Result<T, bye::Error>` in your code or convert to your own error type.
-
----
-
-## Recipes
-
-### Axum/Hyper with graceful shutdown
-
-```rust
-use axum::{routing::get, Router};
-use bye::Bye;
-use std::net::SocketAddr;
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let bye = Bye::new_with_signals()?;
-    let app = Router::new().route("/health", get(|| async { "ok" }));
-
-    let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-    let listener = bye::systemd_tcp_listener(8080).await?;
-
-    // Ready to serve
-    bye::ready()?;
-
-    let server = axum::Server::from_tcp(listener.into_std()?)?
-        .serve(app.into_make_service())
-        .with_graceful_shutdown(async move { bye.on_shutdown().await; });
-
-    server.await?;
-    bye.drain().await;
-    Ok(())
-}
-```
-
-### Periodic worker that exits cleanly
-
-```rust
-let _h = bye.spawn(|tok| async move {
-    loop {
-        tokio::select! {
-            _ = tok.cancelled() => break,
-            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
-                // do work
-            }
-        }
-    }
-});
-```
 
 ---
 

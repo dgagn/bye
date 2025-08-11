@@ -22,6 +22,11 @@ use tracing::{error, info};
 
 use crate::UpgradeUsr1;
 
+/// Main struct to manage graceful shutdown and task tracking
+/// Cloning this struct allows sharing the shutdown signal and task tracking
+/// capabilities across different parts of the application.
+/// When a shutdown is initiated, all tracked tasks will be awaited
+/// before the application fully exits.
 #[derive(Debug, Clone)]
 pub struct Bye {
     inner: Arc<Inner>,
@@ -105,6 +110,8 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Bye {
+    /// Create a new bye instance
+    #[must_use]
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -115,6 +122,11 @@ impl Bye {
         }
     }
 
+    /// Create a new bye instance and spawn signal handlers
+    /// that listen for SIGTERM, SIGINT, SIGQUIT, and SIGUSR1
+    /// to initiate graceful shutdown or upgrade
+    /// # Errors
+    /// If setting up signal handlers fails
     pub fn new_with_signals() -> Result<Self> {
         let grace = Self::new();
         grace.spawn_signals()?;
@@ -122,6 +134,7 @@ impl Bye {
     }
 
     /// Check if it's currently running (i.e., not shut down)
+    #[must_use]
     pub fn is_running(&self) -> bool {
         self.inner.running.load(Ordering::Acquire)
     }
@@ -132,6 +145,7 @@ impl Bye {
     }
 
     /// Clonable token that is cancelled when shutdown is initiated (soft)
+    #[must_use]
     pub fn shutdown_token(&self) -> CancellationToken {
         self.inner.shutdown_started.clone()
     }
@@ -156,6 +170,8 @@ impl Bye {
     }
 
     /// Spawn a new tracked task with a cancellation token
+    /// # Panics
+    /// If called after shutdown has been initiated
     #[must_use]
     pub fn spawn<F, Fut, T>(&self, make: F) -> tokio::task::JoinHandle<T>
     where
@@ -168,6 +184,8 @@ impl Bye {
         self.inner.tracker.spawn(async move { make(tok).await })
     }
 
+    /// Try to spawn a new tracked task with a cancellation token
+    /// Returns None if shutdown has already been initiated
     #[must_use]
     pub fn try_spawn<F, Fut, T>(&self, make: F) -> Option<tokio::task::JoinHandle<T>>
     where
@@ -182,6 +200,9 @@ impl Bye {
         }
     }
 
+    /// Spawn a new tracked task without a cancellation token
+    /// # Panics
+    /// If called after shutdown has been initiated
     #[must_use]
     pub fn spawn_detached<F, T>(&self, f: F) -> tokio::task::JoinHandle<T>
     where
@@ -191,6 +212,8 @@ impl Bye {
         self.spawn(|_| f)
     }
 
+    /// Try to spawn a new tracked task without a cancellation token
+    /// Returns None if shutdown has already been initiated
     #[must_use]
     pub fn try_spawn_detached<F, T>(&self, f: F) -> Option<tokio::task::JoinHandle<T>>
     where
@@ -200,6 +223,13 @@ impl Bye {
         self.try_spawn(|_| f)
     }
 
+    /// Spawn signal handlers for SIGTERM, SIGINT, SIGQUIT, SIGUSR1, and SIGCHLD
+    /// to manage graceful shutdown and upgrades
+    /// # Errors
+    /// If setting up signal handlers fails
+    /// # Notes
+    /// This method is automatically called by `new_with_signals`
+    /// but can be called manually if needed
     pub fn spawn_signals(&self) -> Result<()> {
         let mut sigchld = tokio::signal::unix::signal(SignalKind::child())?;
         let mut sigusr1 = tokio::signal::unix::signal(SignalKind::user_defined1())?;
@@ -207,7 +237,7 @@ impl Bye {
         let mut sigint = tokio::signal::unix::signal(SignalKind::interrupt())?;
         let mut sigquit = tokio::signal::unix::signal(SignalKind::quit())?;
 
-        let upgrade = UpgradeUsr1::new(std::env::current_exe()?)?;
+        let upgrade = UpgradeUsr1::new(&std::env::current_exe()?)?;
         let me = self.clone();
         tokio::spawn(async move {
             let res: Result<()> = async {
@@ -241,16 +271,15 @@ impl Bye {
                                 info!("upgrade successful, shutting down gracefully.");
                                 me.drain().await;
                                 return Ok(());
-                            } else {
-                                #[cfg(feature = "tracing")]
-                                info!("upgrade failed, continuing without upgrade.");
                             }
+                            #[cfg(feature = "tracing")]
+                            info!("upgrade failed, continuing without upgrade.");
                         }
                         _ = sigchld.recv() => {
                             loop {
                                 match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
                                     Ok(WaitStatus::StillAlive) | Err(Errno::ECHILD) => break,
-                                    Ok(_) => continue,
+                                    Ok(_) => {},
                                     Err(e) => {
                                         #[cfg(feature = "tracing")]
                                         error!("Error reaping child process: {}", e);
@@ -258,7 +287,6 @@ impl Bye {
                                     }
                                 }
                             }
-                            continue;
                         }
                     }
                 }

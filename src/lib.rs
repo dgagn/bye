@@ -1,3 +1,12 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs, clippy::pedantic)]
+//! bye: graceful shutdown and USR1 zero-downtime upgrade helpers.
+//!
+//! - `Bye` manages a `CancellationToken` broadcast + a `TaskTracker`.
+//! - `Bye::new_with_signals()` listens for TERM/INT/QUIT -> drain, USR1 -> fork+exec self and wait for child `ready()`.
+//! - `ready()` tells the parent (or your process manager) that the service is ready.
+//! - `systemd_tcp_listener(port)` uses socket activation if available.
+
 use std::{
     env::VarError,
     ffi::{CString, OsStr},
@@ -39,7 +48,7 @@ struct UpgradeUsr1 {
 }
 
 impl UpgradeUsr1 {
-    pub fn new(exe_path: PathBuf) -> bye::Result<Self> {
+    pub fn new(exe_path: &PathBuf) -> bye::Result<Self> {
         let exe_path = CString::new(exe_path.as_os_str().as_bytes())?;
         let args = std::env::args_os()
             .map(|arg| CString::new(arg.as_bytes()))
@@ -127,7 +136,7 @@ async fn fork_and_exec(
     ))?);
 
     // cstr for execve with old argv
-    let argv: Vec<&_> = args.iter().map(|s| s.as_c_str()).collect();
+    let argv_ref: Vec<&_> = args.iter().map(|s| s.as_c_str()).collect();
 
     match unsafe { fork().map_err(Error::Fork)? } {
         ForkResult::Parent { child } => {
@@ -149,12 +158,10 @@ async fn fork_and_exec(
                         Err(Errno::EAGAIN) => {
                             // continue waiting
                             guard.clear_ready();
-                            continue;
                         }
                         Err(Errno::EINTR) => {
                             // interrupted, continue waiting
                             guard.clear_ready();
-                            continue;
                         }
                         Err(e) => {
                             return Err(Error::Nix(e));
@@ -206,7 +213,7 @@ async fn fork_and_exec(
 
             let envp: Vec<&_> = env_with_fd.iter().map(|s| s.as_c_str()).collect();
 
-            execve(path, &argv, &envp).map_err(Error::Execve)?;
+            execve(path, &argv_ref, &envp).map_err(Error::Execve)?;
             std::process::exit(127);
         }
     }
@@ -327,8 +334,7 @@ pub fn ready() -> bye::Result<()> {
             let n = nix::unistd::write(&fd, &[1u8]);
             match n {
                 Ok(_) => break,
-                Err(Errno::EINTR) => continue,
-                Err(Errno::EAGAIN) => continue,
+                Err(Errno::EINTR | Errno::EAGAIN) => {}
                 Err(Errno::EPIPE) => {
                     #[cfg(feature = "tracing")]
                     warn!("UPGRADE_FD is closed, ignoring write");

@@ -31,6 +31,7 @@ use nix::{
 use tokio::{io::unix::AsyncFd, net::TcpListener};
 
 pub use bye::Bye;
+pub use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tracing")]
 use tracing::{error, info, warn};
